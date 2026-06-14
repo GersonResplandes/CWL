@@ -24,10 +24,16 @@ import {
 } from 'lucide-react';
 import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react';
 import type { ClanMemberDetail, ClanRosterPayload, CwlPayload, HistoryItem } from '../shared/cwl';
-import { api } from './api';
+import { ApiError, api } from './api';
 
 type View = 'overview' | 'roster' | 'cwl' | 'history';
 type ApiBootStatus = 'checking' | 'waking' | 'ready' | 'failed';
+type AppMessage = {
+  detail?: string;
+  text: string;
+  title: string;
+  type: 'error' | 'success';
+};
 
 function formatScore(value: number) {
   return new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 1 }).format(value);
@@ -239,6 +245,42 @@ function EmptyState({
   );
 }
 
+function UserAlert({
+  message,
+  onClose
+}: {
+  message: AppMessage;
+  onClose: () => void;
+}) {
+  const isError = message.type === 'error';
+
+  return (
+    <div className="alert-backdrop" role="presentation" onMouseDown={event => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <section
+        className={isError ? 'user-alert user-alert-error' : 'user-alert'}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="user-alert-title"
+      >
+        <div className="user-alert-icon">
+          {isError ? <CircleAlert size={28} /> : <Check size={28} />}
+        </div>
+        <div>
+          <p className="eyebrow">{isError ? 'Atenção da central' : 'Operação concluída'}</p>
+          <h2 id="user-alert-title">{message.title}</h2>
+          <p>{message.text}</p>
+          {message.detail && <small>{message.detail}</small>}
+        </div>
+        <button className="game-button" onClick={onClose}>
+          Entendi
+        </button>
+      </section>
+    </div>
+  );
+}
+
 function MemberDetail({
   detail,
   loading,
@@ -349,7 +391,7 @@ function App() {
   const [memberDetail, setMemberDetail] = useState<ClanMemberDetail | null>(null);
   const [memberDialogOpen, setMemberDialogOpen] = useState(false);
   const [busy, setBusy] = useState('');
-  const [message, setMessage] = useState<{ text: string; error?: boolean } | null>(null);
+  const [message, setMessage] = useState<AppMessage | null>(null);
   const rosterBootstrapped = useRef(false);
 
   useEffect(() => {
@@ -395,7 +437,7 @@ function App() {
     if (!authenticated) return;
     api.config()
       .then(setAppConfig)
-      .catch(reason => notify((reason as Error).message, true));
+      .catch(reason => notifyError(reason, 'Não foi possível carregar as configurações.'));
     if (!rosterBootstrapped.current) {
       rosterBootstrapped.current = true;
       void loadRoster();
@@ -411,9 +453,38 @@ function App() {
     return () => window.removeEventListener('keydown', closeOnEscape);
   }, [memberDialogOpen]);
 
-  function notify(text: string, error = false) {
-    setMessage({ text, error });
-    window.setTimeout(() => setMessage(null), 4000);
+  useEffect(() => {
+    if (!message) return;
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') setMessage(null);
+    }
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [message]);
+
+  function messageFromError(reason: unknown, fallbackTitle: string): AppMessage {
+    if (reason instanceof ApiError) {
+      return {
+        detail: reason.detail,
+        text: reason.message,
+        title: fallbackTitle,
+        type: 'error'
+      };
+    }
+
+    return {
+      text: (reason as Error).message || 'Ocorreu uma falha inesperada.',
+      title: fallbackTitle,
+      type: 'error'
+    };
+  }
+
+  function notifySuccess(title: string, text: string, detail?: string) {
+    setMessage({ detail, text, title, type: 'success' });
+  }
+
+  function notifyError(reason: unknown, fallbackTitle: string) {
+    setMessage(messageFromError(reason, fallbackTitle));
   }
 
   async function loadRoster() {
@@ -421,9 +492,9 @@ function App() {
     try {
       const result = await api.roster();
       setRoster(result);
-      notify(`${result.memberCount} membros carregados da Supercell.`);
+      notifySuccess('Membros carregados', `${result.memberCount} membros foram carregados da Supercell.`);
     } catch (reason) {
-      notify((reason as Error).message, true);
+      notifyError(reason, 'Não foi possível carregar os membros.');
     } finally {
       setBusy('');
     }
@@ -437,7 +508,7 @@ function App() {
       setMemberDetail(await api.member(playerTag));
     } catch (reason) {
       setMemberDialogOpen(false);
-      notify((reason as Error).message, true);
+      notifyError(reason, 'Não foi possível abrir o perfil.');
     } finally {
       setBusy('');
     }
@@ -449,12 +520,15 @@ function App() {
       const result = await api.syncCwl();
       setCwl(result);
       setActiveView('cwl');
-      notify(result.persisted
-        ? 'CWL sincronizada e salva no Google Sheets.'
-        : 'CWL carregada. Configure o Apps Script para salvar o histórico.'
+      notifySuccess(
+        'CWL sincronizada',
+        result.persisted
+          ? 'A temporada foi carregada e salva no Google Sheets.'
+          : 'A temporada foi carregada, mas o histórico não foi salvo.',
+        result.persisted ? undefined : 'Configure APPS_SCRIPT_URL e APPS_SCRIPT_SECRET no backend para ativar o histórico.'
       );
     } catch (reason) {
-      notify((reason as Error).message, true);
+      notifyError(reason, 'Não foi possível sincronizar a CWL.');
     } finally {
       setBusy('');
     }
@@ -467,7 +541,7 @@ function App() {
       setHistoryConfigured(result.configured);
       setHistoryItems(result.items);
     } catch (reason) {
-      notify((reason as Error).message, true);
+      notifyError(reason, 'Não foi possível carregar o histórico.');
     } finally {
       setBusy('');
     }
@@ -781,12 +855,7 @@ function App() {
         </footer>
       </main>
 
-      {message && (
-        <div className={message.error ? 'toast toast-error' : 'toast'}>
-          {message.error ? <CircleAlert size={18} /> : <Check size={18} />}
-          {message.text}
-        </div>
-      )}
+      {message && <UserAlert message={message} onClose={() => setMessage(null)} />}
 
       {memberDialogOpen && (
         <MemberDetail

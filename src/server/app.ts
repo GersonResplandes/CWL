@@ -49,12 +49,86 @@ function requireAuth(request: Parameters<typeof isAuthenticated>[0], reply: any)
 
 function errorResponse(error: unknown, notFoundMessage = 'A Supercell não encontrou uma CWL ativa para este clã.') {
   const statusCode = Number((error as { statusCode?: number }).statusCode) || 502;
-  const message = statusCode === 404
-    ? notFoundMessage
-    : statusCode === 429
-      ? 'Limite da Supercell atingido. Tente novamente em alguns minutos.'
-      : (error as Error).message;
-  return { statusCode, message };
+  const originalMessage = (error as Error).message || '';
+
+  if (statusCode === 400) {
+    return {
+      detail: 'Isso normalmente significa que a liga ainda não começou, ainda não foi liberada pela Supercell ou já saiu da janela oficial de consulta.',
+      message: notFoundMessage,
+      statusCode
+    };
+  }
+
+  if (statusCode === 403) {
+    return {
+      detail: 'Confira se o token da Supercell está ativo e se o IP de saída do servidor está autorizado no painel da Supercell.',
+      message: 'A chave da Supercell não está autorizada para este servidor.',
+      statusCode
+    };
+  }
+
+  if (statusCode === 404) {
+    return {
+      detail: 'Se a liga ainda não começou ou já saiu da janela oficial da API, a Supercell pode não entregar esses dados.',
+      message: notFoundMessage,
+      statusCode
+    };
+  }
+
+  if (statusCode === 429) {
+    return {
+      detail: 'Aguarde alguns minutos antes de sincronizar novamente.',
+      message: 'Limite da Supercell atingido.',
+      statusCode
+    };
+  }
+
+  return {
+    detail: originalMessage,
+    message: 'A comunicação com a Supercell falhou.',
+    statusCode
+  };
+}
+
+function sheetsErrorResponse(error: unknown) {
+  const originalMessage = (error as Error).message || '';
+  const normalized = originalMessage.toLowerCase();
+
+  if (normalized.includes('acesso não autorizado')) {
+    return {
+      detail: 'O APPS_SCRIPT_SECRET da Render precisa ser exatamente igual ao APPS_SCRIPT_SECRET nas propriedades do Apps Script.',
+      message: 'O segredo do Apps Script não confere.',
+      statusCode: 502
+    };
+  }
+
+  if (normalized.includes('unexpected token') || normalized.includes('<!doctype') || normalized.includes('html')) {
+    return {
+      detail: 'Confira se APPS_SCRIPT_URL usa a URL terminada em /exec e se a implantação está publicada como Aplicativo da Web.',
+      message: 'A URL do Apps Script não retornou uma resposta válida.',
+      statusCode: 502
+    };
+  }
+
+  if (
+    normalized.includes('openbyid')
+    || normalized.includes('no item with the given id')
+    || normalized.includes('permission')
+    || normalized.includes('permissão')
+    || normalized.includes('cannot call spreadsheetapp')
+  ) {
+    return {
+      detail: 'Verifique se SPREADSHEET_2026_ID aponta para a planilha nova e se o Apps Script foi autorizado com a sua conta Google.',
+      message: 'A planilha do histórico não pôde ser aberta.',
+      statusCode: 502
+    };
+  }
+
+  return {
+    detail: originalMessage || 'Veja o registro de execução do Apps Script para mais detalhes.',
+    message: 'Não foi possível acessar o histórico no Google Sheets.',
+    statusCode: 502
+  };
 }
 
 function createLoggerConfig() {
@@ -122,6 +196,14 @@ export async function buildApp() {
     }
     const appError = error as Error & { statusCode?: number };
     const statusCode = appError.statusCode && appError.statusCode < 500 ? appError.statusCode : 500;
+
+    if (statusCode === 400 && appError.message.includes('Body cannot be empty')) {
+      return reply.code(400).send({
+        detail: 'Atualize a página para carregar a versão corrigida do sistema e tente sincronizar novamente.',
+        error: 'A requisição de sincronização foi enviada em um formato inválido.'
+      });
+    }
+
     return reply.code(statusCode).send({
       error: statusCode === 500 ? 'Erro interno do servidor.' : appError.message
     });
@@ -170,7 +252,7 @@ export async function buildApp() {
     } catch (error) {
       const result = errorResponse(error);
       request.log.error({ err: error }, 'Falha ao carregar membros do clã');
-      return reply.code(result.statusCode).send({ error: result.message });
+      return reply.code(result.statusCode).send({ detail: result.detail, error: result.message });
     }
   });
 
@@ -184,7 +266,7 @@ export async function buildApp() {
     } catch (error) {
       const result = errorResponse(error, 'A Supercell não encontrou este jogador.');
       request.log.error({ err: error }, 'Falha ao carregar perfil do jogador');
-      return reply.code(result.statusCode).send({ error: result.message });
+      return reply.code(result.statusCode).send({ detail: result.detail, error: result.message });
     }
   });
 
@@ -193,8 +275,9 @@ export async function buildApp() {
     try {
       return await supercell.currentCwl();
     } catch (error) {
-      const result = errorResponse(error);
-      return reply.code(result.statusCode).send({ error: result.message });
+      const result = errorResponse(error, 'Não existe uma CWL ativa disponível para este clã agora.');
+      request.log.error({ err: error }, 'Falha ao carregar CWL atual');
+      return reply.code(result.statusCode).send({ detail: result.detail, error: result.message });
     }
   });
 
@@ -212,9 +295,9 @@ export async function buildApp() {
       }
       return cwl;
     } catch (error) {
-      const result = errorResponse(error);
+      const result = errorResponse(error, 'Não existe uma CWL ativa disponível para este clã agora.');
       request.log.error({ err: error }, 'Falha ao sincronizar CWL');
-      return reply.code(result.statusCode).send({ error: result.message });
+      return reply.code(result.statusCode).send({ detail: result.detail, error: result.message });
     }
   });
 
@@ -223,7 +306,9 @@ export async function buildApp() {
     try {
       return { configured: sheets.configured, items: await sheets.listCwls() };
     } catch (error) {
-      return reply.code(502).send({ error: (error as Error).message });
+      const result = sheetsErrorResponse(error);
+      request.log.error({ err: error }, 'Falha ao carregar histórico no Google Sheets');
+      return reply.code(result.statusCode).send({ detail: result.detail, error: result.message });
     }
   });
 
@@ -233,7 +318,9 @@ export async function buildApp() {
     try {
       return await sheets.getCwl(params.cwlId);
     } catch (error) {
-      return reply.code(502).send({ error: (error as Error).message });
+      const result = sheetsErrorResponse(error);
+      request.log.error({ err: error }, 'Falha ao carregar CWL histórica');
+      return reply.code(result.statusCode).send({ detail: result.detail, error: result.message });
     }
   });
 
@@ -251,7 +338,9 @@ export async function buildApp() {
     try {
       return await sheets.saveAdjustment({ cwlId: params.cwlId, ...body });
     } catch (error) {
-      return reply.code(502).send({ error: (error as Error).message });
+      const result = sheetsErrorResponse(error);
+      request.log.error({ err: error }, 'Falha ao salvar ajuste no Google Sheets');
+      return reply.code(result.statusCode).send({ detail: result.detail, error: result.message });
     }
   });
 
