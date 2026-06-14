@@ -1,4 +1,10 @@
-import type { ClanRosterPayload, CwlPayload, CwlPlayer, WarEntry } from '../shared/cwl.js';
+import type {
+  ClanMemberDetail,
+  ClanRosterPayload,
+  CwlPayload,
+  CwlPlayer,
+  WarEntry
+} from '../shared/cwl.js';
 import { getRanking } from '../shared/scoring.js';
 
 type ApiAttack = {
@@ -246,9 +252,13 @@ export function createSupercellService(token: string, clanTag: string) {
         tag: normalizeTag(member.tag),
         name: member.name,
         th: member.townHallLevel,
+        expLevel: member.expLevel || 0,
         role: member.role,
         clanRank: member.clanRank,
-        leagueName: member.leagueTier?.name || member.league?.name || '',
+        trophies: member.trophies || 0,
+        donations: member.donations || 0,
+        donationsReceived: member.donationsReceived || 0,
+        leagueName: translateLeague(member.leagueTier?.name || member.league?.name),
         leagueIconUrl:
           member.leagueTier?.iconUrls?.small
           || member.league?.iconUrls?.small
@@ -267,6 +277,64 @@ export function createSupercellService(token: string, clanTag: string) {
       },
       memberCount: members.length,
       members
+    };
+    cache.set(cacheKey, { expiresAt: Date.now() + CACHE_MS, value });
+    return value;
+  }
+
+  async function playerDetail(playerTag: string): Promise<ClanMemberDetail> {
+    const normalizedPlayerTag = normalizeTag(playerTag);
+    const rosterData = await roster();
+    if (!rosterData.members.some(member => member.tag === normalizedPlayerTag)) {
+      const error = new Error('Este jogador não pertence ao clã autorizado.');
+      Object.assign(error, { statusCode: 403 });
+      throw error;
+    }
+
+    const cacheKey = `player:${normalizedPlayerTag}`;
+    const cached = cache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.value as ClanMemberDetail;
+
+    const player = await get<any>(`/players/${encodeURIComponent(normalizedPlayerTag)}`);
+    if (!player.clan?.tag || normalizeTag(player.clan.tag) !== allowedClanTag) {
+      const error = new Error('Este jogador não pertence mais ao clã autorizado.');
+      Object.assign(error, { statusCode: 409 });
+      throw error;
+    }
+
+    const value: ClanMemberDetail = {
+      fetchedAt: new Date().toISOString(),
+      tag: normalizedPlayerTag,
+      name: player.name,
+      th: player.townHallLevel || 0,
+      townHallWeaponLevel: player.townHallWeaponLevel || 0,
+      expLevel: player.expLevel || 0,
+      role: player.role || 'member',
+      warPreference: player.warPreference || 'out',
+      trophies: player.trophies || 0,
+      bestTrophies: player.bestTrophies || 0,
+      leagueName: translateLeague(player.leagueTier?.name || player.league?.name),
+      leagueIconUrl:
+        player.leagueTier?.iconUrls?.medium
+        || player.leagueTier?.iconUrls?.small
+        || player.league?.iconUrls?.medium
+        || player.league?.iconUrls?.small
+        || '',
+      warStars: player.warStars || 0,
+      attackWins: player.attackWins || 0,
+      defenseWins: player.defenseWins || 0,
+      donations: player.donations || 0,
+      donationsReceived: player.donationsReceived || 0,
+      clanCapitalContributions: player.clanCapitalContributions || 0,
+      builderHallLevel: player.builderHallLevel || 0,
+      builderBaseTrophies: player.builderBaseTrophies || 0,
+      heroes: (player.heroes || [])
+        .filter((hero: any) => !hero.village || hero.village === 'home')
+        .map((hero: any) => ({
+          name: String(hero.name || ''),
+          level: hero.level || 0,
+          maxLevel: hero.maxLevel || 0
+        }))
     };
     cache.set(cacheKey, { expiresAt: Date.now() + CACHE_MS, value });
     return value;
@@ -300,5 +368,5 @@ export function createSupercellService(token: string, clanTag: string) {
     return value;
   }
 
-  return { allowedClanTag, currentCwl, roster };
+  return { allowedClanTag, currentCwl, playerDetail, roster };
 }

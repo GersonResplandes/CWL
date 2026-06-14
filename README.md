@@ -1,6 +1,6 @@
 # Central CWL
 
-Sistema para escalação, sincronização oficial, pontuação e histórico da Clan War League.
+Sistema para consulta dos membros do clã, sincronização oficial, pontuação e histórico da Clan War League.
 
 ## Arquitetura
 

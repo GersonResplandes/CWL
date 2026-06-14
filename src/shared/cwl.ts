@@ -71,10 +71,44 @@ export type ClanMember = {
   tag: string;
   name: string;
   th: number;
+  expLevel: number;
   role: string;
   clanRank: number;
+  trophies: number;
+  donations: number;
+  donationsReceived: number;
   leagueName: string;
   leagueIconUrl: string;
+};
+
+export type PlayerHero = {
+  name: string;
+  level: number;
+  maxLevel: number;
+};
+
+export type ClanMemberDetail = {
+  fetchedAt: string;
+  tag: string;
+  name: string;
+  th: number;
+  townHallWeaponLevel: number;
+  expLevel: number;
+  role: string;
+  warPreference: string;
+  trophies: number;
+  bestTrophies: number;
+  leagueName: string;
+  leagueIconUrl: string;
+  warStars: number;
+  attackWins: number;
+  defenseWins: number;
+  donations: number;
+  donationsReceived: number;
+  clanCapitalContributions: number;
+  builderHallLevel: number;
+  builderBaseTrophies: number;
+  heroes: PlayerHero[];
 };
 
 export type ClanRosterPayload = {

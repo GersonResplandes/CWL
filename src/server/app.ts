@@ -9,8 +9,19 @@ import { createSheetsService } from './sheets.js';
 import { createSupercellService } from './supercell.js';
 
 const SESSION_COOKIE = 'cwl_session';
+const REDACTED_LOG_FIELDS = ['req.headers.authorization', 'req.headers.cookie', 'body.password', 'body.secret'];
 const supercell = createSupercellService(config.COC_API_TOKEN, config.ALLOWED_CLAN_TAG);
 const sheets = createSheetsService(config.APPS_SCRIPT_URL || undefined, config.APPS_SCRIPT_SECRET || undefined);
+
+function clearSessionCookie(reply: any) {
+  for (const sameSite of ['lax', 'none'] as const) {
+    reply.clearCookie(SESSION_COOKIE, {
+      path: '/',
+      secure: sameSite === 'none' || config.NODE_ENV === 'production',
+      sameSite
+    });
+  }
+}
 
 function verifyPassword(password: string) {
   const [, salt, expectedHex] = config.APP_PASSWORD_HASH.split('$');
@@ -36,22 +47,64 @@ function requireAuth(request: Parameters<typeof isAuthenticated>[0], reply: any)
   return false;
 }
 
-function errorResponse(error: unknown) {
+function errorResponse(error: unknown, notFoundMessage = 'A Supercell não encontrou uma CWL ativa para este clã.') {
   const statusCode = Number((error as { statusCode?: number }).statusCode) || 502;
   const message = statusCode === 404
-    ? 'A Supercell não encontrou uma CWL ativa para este clã.'
+    ? notFoundMessage
     : statusCode === 429
       ? 'Limite da Supercell atingido. Tente novamente em alguns minutos.'
       : (error as Error).message;
   return { statusCode, message };
 }
 
+function createLoggerConfig() {
+  if (config.NODE_ENV !== 'development') {
+    return {
+      redact: REDACTED_LOG_FIELDS
+    };
+  }
+
+  return {
+    level: 'info',
+    redact: REDACTED_LOG_FIELDS,
+    transport: {
+      target: 'pino-pretty',
+      options: {
+        colorize: true,
+        ignore: 'pid,hostname,reqId,req,res,responseTime',
+        messageFormat: '{msg}',
+        singleLine: true,
+        translateTime: 'HH:MM:ss'
+      }
+    }
+  };
+}
+
 export async function buildApp() {
   const app = Fastify({
-    logger: {
-      redact: ['req.headers.authorization', 'req.headers.cookie', 'body.password', 'body.secret']
-    }
+    disableRequestLogging: config.NODE_ENV === 'development',
+    logger: createLoggerConfig()
   });
+  const requestStart = new WeakMap<object, number>();
+
+  if (config.NODE_ENV === 'development') {
+    app.addHook('onRequest', async request => {
+      requestStart.set(request, Date.now());
+    });
+
+    app.addHook('onResponse', async (request, reply) => {
+      const elapsed = Date.now() - (requestStart.get(request) ?? Date.now());
+      const message = `API ${request.method} ${request.url} -> ${reply.statusCode} (${elapsed}ms)`;
+
+      if (reply.statusCode >= 500) {
+        request.log.error(message);
+      } else if (reply.statusCode >= 400) {
+        request.log.warn(message);
+      } else {
+        request.log.info(message);
+      }
+    });
+  }
 
   await app.register(cookie, { secret: config.SESSION_SECRET });
   await app.register(rateLimit, { global: false });
@@ -95,11 +148,8 @@ export async function buildApp() {
   });
 
   app.post('/api/auth/logout', async (_request, reply) => {
-    reply.clearCookie(SESSION_COOKIE, {
-      path: '/',
-      secure: config.NODE_ENV === 'production',
-      sameSite: config.NODE_ENV === 'production' ? 'none' : 'lax'
-    });
+    clearSessionCookie(reply);
+    reply.header('Clear-Site-Data', '"cookies"');
     return { authenticated: false };
   });
 
@@ -120,6 +170,20 @@ export async function buildApp() {
     } catch (error) {
       const result = errorResponse(error);
       request.log.error({ err: error }, 'Falha ao carregar membros do clã');
+      return reply.code(result.statusCode).send({ error: result.message });
+    }
+  });
+
+  app.get('/api/clan/members/:playerTag', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } }
+  }, async (request, reply) => {
+    if (!requireAuth(request, reply)) return;
+    const params = z.object({ playerTag: z.string().min(4).max(20) }).parse(request.params);
+    try {
+      return await supercell.playerDetail(params.playerTag);
+    } catch (error) {
+      const result = errorResponse(error, 'A Supercell não encontrou este jogador.');
+      request.log.error({ err: error }, 'Falha ao carregar perfil do jogador');
       return reply.code(result.statusCode).send({ error: result.message });
     }
   });
