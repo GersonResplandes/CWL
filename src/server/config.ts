@@ -9,6 +9,8 @@ const schema = z.object({
   FRONTEND_ORIGIN: z.string().default('http://localhost:5173'),
   APPS_SCRIPT_URL: z.string().url().optional().or(z.literal('')),
   APPS_SCRIPT_SECRET: z.string().min(16).optional().or(z.literal('')),
+  CRON_SECRET: z.string().min(16).optional().or(z.literal('')),
+  AUTO_SYNC_GRACE_MINUTES: z.coerce.number().int().min(0).max(180).default(10),
   PORT: z.coerce.number().int().positive().default(3000),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development')
 });

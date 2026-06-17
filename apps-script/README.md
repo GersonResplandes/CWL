@@ -14,13 +14,19 @@ APPS_SCRIPT_SECRET=um-segredo-longo-e-aleatorio
 setupYear(2026)
 ```
 
-Isso cria somente as abas mensais:
+Isso cria as abas mensais base:
 
 ```text
 CWL_2026_01
 CWL_2026_02
 ...
 CWL_2026_12
+```
+
+Quando a Supercell retornar uma temporada com dia, como na CWL extra de junho de 2026, o sistema cria a aba sob demanda:
+
+```text
+CWL_2026_06_16
 ```
 
 5. Autorize o acesso ao Google Sheets.

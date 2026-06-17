@@ -65,6 +65,13 @@ function statusLabel(status: string) {
   } as Record<string, string>)[status] || status;
 }
 
+function findOperationalRound(cwl: CwlPayload) {
+  return cwl.rounds.find(round => round.warTag && round.state !== 'warEnded')
+    ?? cwl.rounds.filter(round => round.warTag).at(-1)
+    ?? cwl.rounds[0]
+    ?? null;
+}
+
 function warPreferenceLabel(preference: string) {
   return preference === 'in' ? 'Disponível para guerras' : 'Fora das guerras';
 }
@@ -245,6 +252,28 @@ function EmptyState({
   );
 }
 
+function PageLoading({
+  icon: Icon,
+  title,
+  description
+}: {
+  icon: typeof Archive;
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="page-loading" aria-live="polite">
+      <div className="page-loading-rune">
+        <Icon size={28} />
+        <LoaderCircle className="spin" size={38} />
+      </div>
+      <p className="eyebrow">Central em operação</p>
+      <h3>{title}</h3>
+      <p>{description}</p>
+    </div>
+  );
+}
+
 function UserAlert({
   message,
   onClose
@@ -386,8 +415,11 @@ function App() {
   const [appConfig, setAppConfig] = useState<{ clanTag: string; sheetsConfigured: boolean } | null>(null);
   const [roster, setRoster] = useState<ClanRosterPayload | null>(null);
   const [cwl, setCwl] = useState<CwlPayload | null>(null);
+  const [selectedCwlDay, setSelectedCwlDay] = useState<number | null>(null);
+  const [cwlLoadAttempted, setCwlLoadAttempted] = useState(false);
   const [historyItems, setHistoryItems] = useState<HistoryItem[]>([]);
   const [historyConfigured, setHistoryConfigured] = useState(false);
+  const [historyLoadAttempted, setHistoryLoadAttempted] = useState(false);
   const [memberDetail, setMemberDetail] = useState<ClanMemberDetail | null>(null);
   const [memberDialogOpen, setMemberDialogOpen] = useState(false);
   const [busy, setBusy] = useState('');
@@ -514,28 +546,49 @@ function App() {
     }
   }
 
-  async function syncCwl() {
+  function openView(view: View) {
+    setActiveView(view);
+
+    if (view === 'cwl') {
+      void syncCwl();
+    }
+
+    if (view === 'history') {
+      void loadHistory();
+    }
+  }
+
+  async function syncCwl(options: { showSuccess?: boolean } = {}) {
     setBusy('cwl');
+    setCwlLoadAttempted(false);
     try {
       const result = await api.syncCwl();
       setCwl(result);
+      setSelectedCwlDay(findOperationalRound(result)?.day ?? null);
       setActiveView('cwl');
-      notifySuccess(
-        'CWL sincronizada',
-        result.persisted
-          ? 'A temporada foi carregada e salva no Google Sheets.'
-          : 'A temporada foi carregada, mas o histórico não foi salvo.',
-        result.persisted ? undefined : 'Configure APPS_SCRIPT_URL e APPS_SCRIPT_SECRET no backend para ativar o histórico.'
-      );
+      if (options.showSuccess) {
+        notifySuccess(
+          'CWL sincronizada',
+          result.persisted
+            ? 'A temporada foi carregada e salva no Google Sheets.'
+            : 'A temporada foi carregada, mas o histórico não foi salvo.',
+          result.persisted
+            ? undefined
+            : result.warnings.find(warning => warning.startsWith('Histórico não salvo'))
+              || 'Configure APPS_SCRIPT_URL e APPS_SCRIPT_SECRET no backend para ativar o histórico.'
+        );
+      }
     } catch (reason) {
       notifyError(reason, 'Não foi possível sincronizar a CWL.');
     } finally {
       setBusy('');
+      setCwlLoadAttempted(true);
     }
   }
 
   async function loadHistory() {
     setBusy('history');
+    setHistoryLoadAttempted(false);
     try {
       const result = await api.history();
       setHistoryConfigured(result.configured);
@@ -544,6 +597,7 @@ function App() {
       notifyError(reason, 'Não foi possível carregar o histórico.');
     } finally {
       setBusy('');
+      setHistoryLoadAttempted(true);
     }
   }
 
@@ -553,8 +607,11 @@ function App() {
     setAuthenticated(false);
     setRoster(null);
     setCwl(null);
+    setSelectedCwlDay(null);
+    setCwlLoadAttempted(false);
     setHistoryItems([]);
     setHistoryConfigured(false);
+    setHistoryLoadAttempted(false);
     setMemberDetail(null);
     setMemberDialogOpen(false);
     rosterBootstrapped.current = false;
@@ -579,10 +636,24 @@ function App() {
   }
 
   const clan = roster?.config;
+  const cwlOperationalRound = cwl ? findOperationalRound(cwl) : null;
+  const cwlVisibleRound = cwl?.rounds.find(round => round.day === selectedCwlDay && round.warTag)
+    ?? cwlOperationalRound;
+  const cwlVisibleRoundIndex = cwlVisibleRound ? cwlVisibleRound.day - 1 : -1;
+  const cwlSelectedTags = new Set(
+    cwlVisibleRoundIndex >= 0
+      ? cwl?.players
+        .filter(player => player.wars[cwlVisibleRoundIndex]?.selected)
+        .map(player => player.tag) ?? []
+      : []
+  );
+  const cwlRoundRanking = cwl
+    ? cwl.ranking.filter(row => cwlSelectedTags.has(row.player.tag))
+    : [];
+  const cwlReserveCount = cwl ? Math.max(cwl.players.length - cwlRoundRanking.length, 0) : 0;
   const cwlSyncedRounds = cwl?.rounds.filter(round => round.warTag).length ?? 0;
-  const cwlEndedRounds = cwl?.rounds.filter(round => round.state === 'warEnded').length ?? 0;
-  const cwlAttackCount = cwl?.ranking.reduce((total, row) => total + row.stats.attacks, 0) ?? 0;
-  const cwlTopPlayer = cwl?.ranking[0];
+  const cwlAttackCount = cwlRoundRanking.reduce((total, row) => total + row.stats.attacks, 0);
+  const cwlTopPlayer = cwlRoundRanking[0];
 
   return (
     <div className="app-shell">
@@ -611,10 +682,7 @@ function App() {
               className="nav-button"
               aria-label={label}
               aria-current={activeView === view ? 'page' : undefined}
-              onClick={() => {
-                setActiveView(view);
-                if (view === 'history') void loadHistory();
-              }}
+              onClick={() => openView(view)}
             >
               <Icon size={20} />
               <span>{label}</span>
@@ -649,16 +717,6 @@ function App() {
               <p>{clan?.clanName || 'Clã autorizado'}</p>
               <span>{clan?.league || 'Aguardando dados oficiais'}</span>
             </div>
-          </div>
-          <div className="topbar-actions">
-            <button
-              className="game-button game-button-primary"
-              onClick={() => void syncCwl()}
-              disabled={busy === 'cwl'}
-            >
-              {busy === 'cwl' ? <LoaderCircle className="spin" size={18} /> : <RefreshCcw size={18} />}
-              Sincronizar
-            </button>
           </div>
         </header>
 
@@ -731,12 +789,17 @@ function App() {
               {cwl && <span className="season-chip"><Swords size={16} /> {cwl.config.format}</span>}
             </div>
 
-            {!cwl ? (
+            {busy === 'cwl' || (!cwl && !cwlLoadAttempted) ? (
+              <PageLoading
+                icon={Swords}
+                title="Sincronizando CWL"
+                description="Consultando a Supercell e preparando os dados da rodada atual."
+              />
+            ) : !cwl ? (
               <EmptyState
                 icon={Swords}
-                title="Nenhuma CWL sincronizada"
-                description="Use o botão Sincronizar para consultar a temporada disponível."
-                action={<button className="game-button game-button-primary" onClick={() => void syncCwl()}>Sincronizar CWL</button>}
+                title="CWL indisponível"
+                description="A Supercell ainda não retornou uma CWL ativa para este clã."
               />
             ) : (
               <div className="cwl-layout">
@@ -749,18 +812,30 @@ function App() {
                   <div className="cwl-metrics">
                     <span><Swords size={20} /><strong>{cwlSyncedRounds}/7</strong><small>Rodadas</small></span>
                     <span><Trophy size={20} /><strong>{cwl.config.warWins}</strong><small>Vitórias</small></span>
-                    <span><Star size={20} /><strong>{cwlAttackCount}</strong><small>Ataques</small></span>
+                    <span><Users size={20} /><strong>{cwlRoundRanking.length}</strong><small>Escalados dia {cwlVisibleRound?.day ?? '--'}</small></span>
+                    <span><Shield size={20} /><strong>{cwlReserveCount}</strong><small>Reservas</small></span>
+                    <span><Star size={20} /><strong>{cwlAttackCount}</strong><small>Ataques do dia</small></span>
                     <span><Crown size={20} /><strong>{cwlTopPlayer?.player.name ?? '--'}</strong><small>Líder atual</small></span>
                   </div>
                 </section>
 
                 <section className="round-strip" aria-label="Rodadas da CWL">
                   {cwl.rounds.map(round => (
-                    <div key={round.day} className={round.warTag ? 'round-item round-item-ready' : 'round-item'}>
+                    <button
+                      key={round.day}
+                      className={[
+                        'round-item',
+                        round.warTag ? 'round-item-ready' : '',
+                        round.day === cwlVisibleRound?.day ? 'round-item-active' : ''
+                      ].filter(Boolean).join(' ')}
+                      type="button"
+                      disabled={!round.warTag}
+                      onClick={() => setSelectedCwlDay(round.day)}
+                    >
                       <span>Rodada {round.day}</span>
                       <strong>{statusLabel(round.state)}</strong>
                       <small>{round.warTag || 'Sem warTag'}</small>
-                    </div>
+                    </button>
                   ))}
                 </section>
 
@@ -770,13 +845,15 @@ function App() {
                       <p className="eyebrow">Pontuação atual</p>
                       <h2>Ranking individual</h2>
                     </div>
-                    <span className="ranking-counter">{cwlEndedRounds} encerrada(s)</span>
+                    <span className="ranking-counter">
+                      Rodada {cwlVisibleRound?.day ?? '--'} · {cwlRoundRanking.length}/{cwl.config.teamSize || cwlRoundRanking.length} escalados
+                    </span>
                   </div>
                   <div className="ranking-table">
                     <div className="ranking-head">
                       <span>#</span><span>Jogador</span><span>Pontos</span><span>Estrelas</span><span>W.O.</span>
                     </div>
-                    {cwl.ranking.map((row, index) => (
+                    {cwlRoundRanking.map((row, index) => (
                       <div className="ranking-row" key={row.player.tag}>
                         <strong className={index < 3 ? 'podium-rank' : ''}>{index + 1}</strong>
                         <span><strong>{row.player.name}</strong><small>CV{row.player.th}</small></span>
@@ -786,6 +863,11 @@ function App() {
                       </div>
                     ))}
                   </div>
+                  {cwlReserveCount > 0 && (
+                    <p className="ranking-note">
+                      {cwlReserveCount} jogador(es) do elenco da CWL estão como reserva nesta rodada e podem aparecer aqui se forem escalados em outro dia.
+                    </p>
+                  )}
                 </section>
               </div>
             )}
@@ -800,13 +882,15 @@ function App() {
                 <h1>Histórico das CWLs</h1>
                 <p>Temporadas preservadas mesmo após deixarem a API oficial.</p>
               </div>
-              <button className="game-button" onClick={() => void loadHistory()} disabled={busy === 'history'}>
-                {busy === 'history' ? <LoaderCircle className="spin" size={18} /> : <RefreshCcw size={18} />}
-                Atualizar
-              </button>
             </div>
 
-            {!historyConfigured ? (
+            {busy === 'history' || !historyLoadAttempted ? (
+              <PageLoading
+                icon={History}
+                title="Carregando histórico"
+                description="Consultando o Google Sheets e organizando as temporadas salvas."
+              />
+            ) : !historyConfigured ? (
               <EmptyState
                 icon={Database}
                 title="Google Sheets ainda não configurado"

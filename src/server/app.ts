@@ -4,6 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
 import { scryptSync, timingSafeEqual } from 'node:crypto';
 import { z, ZodError } from 'zod';
+import { evaluateCwlAutoSync } from './auto-sync.js';
 import { config } from './config.js';
 import { createSheetsService } from './sheets.js';
 import { createSupercellService } from './supercell.js';
@@ -29,6 +30,44 @@ function verifyPassword(password: string) {
   const actual = scryptSync(password, salt, 64);
   const expected = Buffer.from(expectedHex, 'hex');
   return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function safeCompareSecret(actual: string, expected: string) {
+  const actualBuffer = Buffer.from(actual);
+  const expectedBuffer = Buffer.from(expected);
+  return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+function getAutomationSecret(request: { headers: Record<string, string | string[] | undefined> }) {
+  const authorization = request.headers.authorization;
+  if (typeof authorization === 'string' && authorization.startsWith('Bearer ')) {
+    return authorization.slice('Bearer '.length).trim();
+  }
+
+  const header = request.headers['x-cwl-cron-secret'];
+  if (Array.isArray(header)) return header[0] || '';
+  return header || '';
+}
+
+function requireAutomationSecret(
+  request: { headers: Record<string, string | string[] | undefined> },
+  reply: any
+) {
+  if (!config.CRON_SECRET) {
+    reply.code(503).send({
+      detail: 'Configure CRON_SECRET na Render antes de usar o salvamento automático.',
+      error: 'Automação não configurada.'
+    });
+    return false;
+  }
+
+  const provided = getAutomationSecret(request);
+  if (!provided || !safeCompareSecret(provided, config.CRON_SECRET)) {
+    reply.code(401).send({ error: 'Automação não autorizada.' });
+    return false;
+  }
+
+  return true;
 }
 
 function isAuthenticated(request: {
@@ -129,6 +168,26 @@ function sheetsErrorResponse(error: unknown) {
     message: 'Não foi possível acessar o histórico no Google Sheets.',
     statusCode: 502
   };
+}
+
+async function persistCwlSnapshot(cwl: Awaited<ReturnType<typeof supercell.currentCwl>>, log: any) {
+  if (!sheets.configured) {
+    cwl.persisted = false;
+    return false;
+  }
+
+  try {
+    await sheets.saveCwl(cwl);
+    cwl.persisted = true;
+    return true;
+  } catch (sheetError) {
+    log.error({ err: sheetError }, 'Falha ao salvar CWL no Google Sheets');
+    cwl.persisted = false;
+    cwl.warnings.push(
+      `Histórico não salvo no Google Sheets: ${(sheetError as Error).message || 'falha desconhecida.'}`
+    );
+    return false;
+  }
 }
 
 function createLoggerConfig() {
@@ -287,17 +346,74 @@ export async function buildApp() {
     if (!requireAuth(request, reply)) return;
     try {
       const cwl = await supercell.currentCwl();
-      if (sheets.configured) {
-        await sheets.saveCwl(cwl);
-        cwl.persisted = true;
-      } else {
-        cwl.persisted = false;
-      }
+      await persistCwlSnapshot(cwl, request.log);
       return cwl;
     } catch (error) {
       const result = errorResponse(error, 'Não existe uma CWL ativa disponível para este clã agora.');
       request.log.error({ err: error }, 'Falha ao sincronizar CWL');
       return reply.code(result.statusCode).send({ detail: result.detail, error: result.message });
+    }
+  });
+
+  app.route({
+    method: ['GET', 'POST'],
+    url: '/api/cwl/auto-sync',
+    config: { rateLimit: { max: 20, timeWindow: '1 hour' } },
+    handler: async (request, reply) => {
+      if (!requireAutomationSecret(request, reply)) return;
+      if (!sheets.configured) {
+        return reply.code(503).send({
+          detail: 'Configure APPS_SCRIPT_URL e APPS_SCRIPT_SECRET para salvar o histórico.',
+          error: 'Google Sheets não configurado.'
+        });
+      }
+
+      try {
+        const cwl = await supercell.currentCwl({ bypassCache: true });
+        const decision = evaluateCwlAutoSync(cwl, new Date(), config.AUTO_SYNC_GRACE_MINUTES);
+
+        if (decision.action === 'skip') {
+          return {
+            ok: true,
+            action: decision.action,
+            finalSnapshot: decision.finalSnapshot,
+            reason: decision.reason,
+            nextCheckAt: decision.nextCheckAt,
+            cwlId: cwl.cwlId,
+            groupState: cwl.groupState,
+            targetRound: decision.targetRound
+          };
+        }
+
+        const persisted = await persistCwlSnapshot(cwl, request.log);
+        if (!persisted) {
+          return reply.code(502).send({
+            detail: cwl.warnings.at(-1) || 'Veja o registro do backend e do Apps Script.',
+            error: 'Não foi possível salvar a CWL no Google Sheets.'
+          });
+        }
+
+        request.log.info(
+          `Auto-sync CWL ${cwl.cwlId} rodada ${decision.targetRound?.day ?? '--'} salvo no Google Sheets`
+        );
+
+        return {
+          ok: true,
+          action: decision.action,
+          finalSnapshot: decision.finalSnapshot,
+          reason: decision.reason,
+          nextCheckAt: decision.nextCheckAt,
+          persisted,
+          cwlId: cwl.cwlId,
+          groupState: cwl.groupState,
+          targetRound: decision.targetRound,
+          updatedAt: cwl.fetchedAt
+        };
+      } catch (error) {
+        const result = errorResponse(error, 'Não existe uma CWL ativa disponível para este clã agora.');
+        request.log.error({ err: error }, 'Falha no salvamento automático da CWL');
+        return reply.code(result.statusCode).send({ detail: result.detail, error: result.message });
+      }
     }
   });
 

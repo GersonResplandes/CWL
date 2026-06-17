@@ -27,6 +27,9 @@ export type CwlPlayer = {
 
 export type CwlRound = {
   day: number;
+  endTime: string | null;
+  preparationStartTime: string | null;
+  startTime: string | null;
   warTag: string | null;
   state: string;
 };

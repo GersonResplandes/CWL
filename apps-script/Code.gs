@@ -8,6 +8,8 @@ function doGet() {
   return jsonResponse({
     ok: true,
     name: 'Central CWL Sheets API',
+    version: 4,
+    supportsDailyCwlId: true,
     timestamp: new Date().toISOString()
   });
 }

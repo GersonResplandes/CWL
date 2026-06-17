@@ -64,6 +64,25 @@ export function normalizeTag(value: string) {
   return `#${clean}`;
 }
 
+function normalizeApiTime(value?: string) {
+  if (!value) return null;
+  const direct = Date.parse(value);
+  if (!Number.isNaN(direct)) return new Date(direct).toISOString();
+
+  const match = value.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(?:\.\d{3})?Z$/);
+  if (!match) return null;
+
+  const [, year, month, day, hour, minute, second] = match;
+  return new Date(Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second)
+  )).toISOString();
+}
+
 function thOf(member: ApiMember | undefined, fallback = 3) {
   return member?.townhallLevel ?? member?.townHallLevel ?? fallback;
 }
@@ -131,6 +150,9 @@ export function normalizeCwl(
 
   const rounds = group.rounds.slice(0, 7).map((_, index) => ({
     day: index + 1,
+    endTime: normalizeApiTime(wars[index]?.endTime),
+    preparationStartTime: normalizeApiTime(wars[index]?.preparationStartTime),
+    startTime: normalizeApiTime(wars[index]?.startTime),
     warTag: wars[index]?.warTag || null,
     state: wars[index]?.state || 'notStarted'
   }));
@@ -340,10 +362,10 @@ export function createSupercellService(token: string, clanTag: string) {
     return value;
   }
 
-  async function currentCwl(): Promise<CwlPayload> {
+  async function currentCwl(options: { bypassCache?: boolean } = {}): Promise<CwlPayload> {
     const cacheKey = `cwl:${allowedClanTag}`;
     const cached = cache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) return cached.value as CwlPayload;
+    if (!options.bypassCache && cached && cached.expiresAt > Date.now()) return cached.value as CwlPayload;
 
     const encoded = encodeURIComponent(allowedClanTag);
     const [clan, group] = await Promise.all([

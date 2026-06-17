@@ -88,19 +88,31 @@ function ensureCwlSheet(spreadsheet, name) {
 
 function cwlSheetName(cwlId) {
   var normalized = normalizeCwlId(cwlId);
-  return 'CWL_' + normalized.replace('-', '_');
+  return 'CWL_' + normalized.replace(/-/g, '_');
 }
 
 function normalizeCwlId(cwlId) {
-  var normalized = String(cwlId || '').trim();
-  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(normalized)) {
-    throw new Error('O identificador da CWL deve usar o formato AAAA-MM.');
+  var normalized = cwlIdToText(cwlId);
+  if (!/^\d{4}-(0[1-9]|1[0-2])(-([0-2][0-9]|3[01]))?$/.test(normalized)) {
+    throw new Error('O identificador da CWL deve usar o formato AAAA-MM ou AAAA-MM-DD.');
   }
   return normalized;
 }
 
+function cwlIdToText(value) {
+  if (Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value.getTime())) {
+    return Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+
+  var text = String(value || '').trim();
+  if (/^\d{4}-(0[1-9]|1[0-2])(-([0-2][0-9]|3[01]))?T/.test(text)) {
+    return text.slice(0, 10);
+  }
+  return text;
+}
+
 function isCwlSheet(sheet) {
-  return /^CWL_\d{4}_(0[1-9]|1[0-2])$/.test(sheet.getName());
+  return /^CWL_\d{4}_(0[1-9]|1[0-2])(_([0-2][0-9]|3[01]))?$/.test(sheet.getName());
 }
 
 function pad2(value) {
@@ -176,6 +188,8 @@ function writeMetadata(sheet, cwl) {
     ['ESTADO', cwl.groupState],
     ['ATUALIZADO_EM', new Date(cwl.fetchedAt)]
   ];
+  sheet.getRange(1, 2).setNumberFormat('@');
+  sheet.getRange(3, 2).setNumberFormat('@');
   sheet.getRange(1, 1, metadata.length, 2).setValues(metadata);
   sheet.getRange(1, 1, metadata.length, 1).setFontWeight('bold').setFontColor('#143942');
 }
@@ -226,9 +240,11 @@ function listCwls() {
           var metadata = {};
           values.forEach(function (row) { metadata[row[0]] = row[1]; });
           if (!metadata.ID_CWL) return;
+          var cwlId = normalizeCwlId(metadata.ID_CWL);
+          var season = normalizeCwlId(metadata.TEMPORADA || metadata.ID_CWL);
           result.push({
-            cwlId: metadata.ID_CWL,
-            season: metadata.TEMPORADA,
+            cwlId: cwlId,
+            season: season,
             league: metadata.LIGA,
             format: metadata.FORMATO,
             state: metadata.ESTADO,

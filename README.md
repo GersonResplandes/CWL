@@ -52,6 +52,8 @@ SESSION_SECRET
 FRONTEND_ORIGIN
 APPS_SCRIPT_URL
 APPS_SCRIPT_SECRET
+CRON_SECRET
+AUTO_SYNC_GRACE_MINUTES
 PORT
 ```
 
@@ -101,8 +103,31 @@ Configure:
 - Hash da senha.
 - URL exata do frontend em `FRONTEND_ORIGIN`.
 - URL e segredo do Apps Script.
+- Um segredo longo em `CRON_SECRET` para o salvamento automatico.
+- `AUTO_SYNC_GRACE_MINUTES`, por padrao `10`, para aguardar alguns minutos depois do `endTime` oficial antes de considerar a guerra pronta para fechamento.
 
 Cadastre na chave da Supercell todas as faixas mostradas pela Render em **Connect > Outbound**.
+
+### Salvamento automatico da CWL
+
+O backend expoe a rota protegida:
+
+```text
+GET ou POST /api/cwl/auto-sync
+Authorization: Bearer SEU_CRON_SECRET
+```
+
+Use um agendador externo, como cron-job.org, GitHub Actions agendado ou outro monitor HTTP, para chamar essa rota durante a CWL. No plano gratuito da Render, esse agendador tambem ajuda a acordar o servidor.
+
+Fluxo da rota:
+
+- Consulta a CWL ativa na Supercell sem usar cache.
+- Le o `endTime` oficial de cada guerra.
+- Se uma rodada estiver `warEnded`, salva o fechamento diario no Google Sheets.
+- Se o horario final ja passou, mas a Supercell ainda nao marcou `warEnded`, nao salva e pede nova tentativa.
+- No fim da ultima guerra, quando a ultima rodada estiver encerrada, salva o fechamento final da CWL.
+
+Sugestao simples: agende a chamada a cada 30 ou 60 minutos durante os dias de CWL. O salvamento e idempotente: a planilha e atualizada com o retrato oficial mais recente.
 
 ### Google Sheets
 
