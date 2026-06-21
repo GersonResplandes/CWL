@@ -4,15 +4,23 @@ export type WarEntry = {
   status: WarStatus;
   selected: boolean;
   attacked: boolean;
+  mapPosition: number | null;
+  effectiveTh: number;
+  targetMapPosition: number | null;
   targetTh: number;
+  targetEffectiveTh: number;
   stars: number;
   destruction: number;
   defended: boolean;
+  enemyMapPosition: number | null;
   enemyTh: number;
+  enemyEffectiveTh: number;
   defenseStars: number;
   warTag: string | null;
   source: 'supercell' | 'manual';
   manuallyAdjusted: boolean;
+  attackScore?: number;
+  defenseScore?: number;
   score?: number;
 };
 
@@ -37,6 +45,8 @@ export type CwlRound = {
 export type PlayerRanking = {
   player: Pick<CwlPlayer, 'id' | 'tag' | 'name' | 'th'>;
   stats: {
+    attackScore: number;
+    defenseScore: number;
     score: number;
     stars: number;
     destruction: number;
@@ -66,6 +76,10 @@ export type CwlPayload = {
   rounds: CwlRound[];
   players: CwlPlayer[];
   ranking: PlayerRanking[];
+  roundRankings: Array<{
+    day: number;
+    ranking: PlayerRanking[];
+  }>;
   warnings: string[];
   persisted?: boolean;
 };

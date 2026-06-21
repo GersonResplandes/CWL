@@ -1,8 +1,32 @@
 import { describe, expect, it } from 'vitest';
 import type { CwlPlayer, WarEntry } from '../src/shared/cwl.js';
 import { evaluateCwlAutoSync } from '../src/server/auto-sync.js';
-import { calculateWarScore, getRanking } from '../src/shared/scoring.js';
+import { calculateAttackScore, calculateDefenseScore, calculateWarScore, getRanking, getRoundRanking } from '../src/shared/scoring.js';
 import { normalizeCwl, normalizeTag } from '../src/server/supercell.js';
+
+function warEntry(overrides: Partial<WarEntry> = {}): WarEntry {
+  return {
+    status: 'pending',
+    selected: true,
+    attacked: false,
+    mapPosition: null,
+    effectiveTh: 15,
+    targetMapPosition: null,
+    targetTh: 15,
+    targetEffectiveTh: 15,
+    stars: 0,
+    destruction: 0,
+    defended: false,
+    enemyMapPosition: null,
+    enemyTh: 15,
+    enemyEffectiveTh: 15,
+    defenseStars: 0,
+    warTag: '#WAR',
+    source: 'supercell',
+    manuallyAdjusted: false,
+    ...overrides
+  };
+}
 
 describe('normalização da integração CWL', () => {
   it('normaliza e valida tags', () => {
@@ -71,6 +95,61 @@ describe('normalização da integração CWL', () => {
     expect(result.players[1].wars.map(entry => entry.status)).toEqual(['notSelected', 'notSelected', 'pending']);
   });
 
+  it('calcula CV efetivo pela ordem do mapa da guerra', () => {
+    const allowed = '0289PYLQGRJCUV';
+    const tagAt = (index: number) => `#P0Y${allowed[Math.floor(index / allowed.length)]}${allowed[index % allowed.length]}`;
+    const realThs = [18, 18, 17, 17, 17, 17, 17, 18, 16, 17, 16, 16, 17, 14, 14, 14, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 12];
+    const expectedEffectiveThs = [18, 18, 17, 17, 17, 17, 17, 17, 16, 16, 16, 16, 16, 14, 14, 14, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 12];
+    const members = realThs.map((th, index) => ({
+      tag: tagAt(index),
+      name: `Jogador ${index + 1}`,
+      townHallLevel: th
+    }));
+    const group = {
+      tag: '#P0Y8G',
+      state: 'inWar',
+      season: '2026-06',
+      clans: [{ tag: '#P0Y8', name: 'Nosso Clã', members }],
+      rounds: [{ warTags: ['#WAR1'] }]
+    };
+    const war = {
+      state: 'preparation',
+      teamSize: 30,
+      clan: {
+        tag: '#P0Y8',
+        name: 'Nosso Clã',
+        stars: 0,
+        destructionPercentage: 0,
+        members: members.map((member, index) => ({ ...member, mapPosition: index + 1, attacks: [] }))
+      },
+      opponent: {
+        tag: '#Q2G9',
+        name: 'Rival',
+        stars: 0,
+        destructionPercentage: 0,
+        members: members.map((member, index) => ({
+          ...member,
+          tag: `#Q2G${allowed[Math.floor(index / allowed.length)]}${allowed[index % allowed.length]}`,
+          mapPosition: index + 1,
+          attacks: []
+        }))
+      },
+      warTag: '#WAR1'
+    };
+
+    const result = normalizeCwl(
+      { name: 'Nosso Clã', warLeague: { name: 'Crystal League III' }, badgeUrls: { medium: 'badge.png' } },
+      group,
+      [war],
+      '#P0Y8'
+    );
+
+    expect(result.players.map(player => player.wars[0].effectiveTh)).toEqual(expectedEffectiveThs);
+    expect(result.players[7].wars[0].effectiveTh).toBe(17);
+    expect(result.players[9].wars[0].effectiveTh).toBe(16);
+    expect(result.players[12].wars[0].effectiveTh).toBe(16);
+  });
+
   it('decide quando o fechamento automatico pode salvar', () => {
     const base = {
       version: 5,
@@ -91,6 +170,7 @@ describe('normalização da integração CWL', () => {
       },
       players: [],
       ranking: [],
+      roundRankings: [],
       warnings: []
     };
 
@@ -136,22 +216,93 @@ describe('pontuação', () => {
   };
 
   it('calcula ataque contra CV superior', () => {
-    const entry: WarEntry = {
+    const entry = warEntry({
       status: 'attacked',
-      selected: true,
       attacked: true,
       targetTh: 16,
+      targetEffectiveTh: 16,
       stars: 2,
       destruction: 80,
-      defended: false,
-      enemyTh: 15,
-      defenseStars: 0,
-      warTag: '#WAR1',
-      source: 'supercell',
-      manuallyAdjusted: false
-    };
+      warTag: '#WAR1'
+    });
 
     expect(calculateWarScore(player, entry)).toBe(34);
+  });
+
+  it('aplica a fórmula base do ataque', () => {
+    const entry = warEntry({
+      status: 'attacked',
+      attacked: true,
+      stars: 3,
+      destruction: 90
+    });
+
+    expect(calculateAttackScore(player, entry)).toBe(39);
+  });
+
+  it('não dá bônus de CV acima sem estrela', () => {
+    const entry = warEntry({
+      status: 'attacked',
+      attacked: true,
+      targetTh: 16,
+      targetEffectiveTh: 16,
+      stars: 0,
+      destruction: 50
+    });
+
+    expect(calculateAttackScore(player, entry)).toBe(5);
+  });
+
+  it('penaliza ataque contra CV efetivo abaixo', () => {
+    const entry = warEntry({
+      status: 'attacked',
+      attacked: true,
+      targetTh: 14,
+      targetEffectiveTh: 14,
+      stars: 3,
+      destruction: 100
+    });
+
+    expect(calculateAttackScore(player, entry)).toBe(36);
+  });
+
+  it('aplica W.O. como -35 pontos', () => {
+    expect(calculateAttackScore(player, warEntry({ status: 'wo' }))).toBe(-35);
+  });
+
+  it('usa a matriz de defesa por relação de CV efetivo', () => {
+    const superior = [15, 0, 0, -5];
+    const equal = [10, 0, -5, -10];
+    const inferior = [5, -5, -10, -20];
+
+    superior.forEach((score, stars) => {
+      expect(calculateDefenseScore(player, warEntry({
+        defended: true,
+        defenseStars: stars,
+        enemyTh: 16,
+        enemyEffectiveTh: 16
+      }))).toBe(score);
+    });
+
+    equal.forEach((score, stars) => {
+      expect(calculateDefenseScore(player, warEntry({
+        defended: true,
+        defenseStars: stars,
+        enemyTh: 15,
+        enemyEffectiveTh: 15
+      }))).toBe(score);
+    });
+
+    inferior.forEach((score, stars) => {
+      expect(calculateDefenseScore(player, warEntry({
+        defended: true,
+        defenseStars: stars,
+        enemyTh: 14,
+        enemyEffectiveTh: 14
+      }))).toBe(score);
+    });
+
+    expect(calculateDefenseScore(player, warEntry({ defended: false }))).toBe(0);
   });
 
   it('usa score, estrelas e destruição como desempate', () => {
@@ -163,23 +314,39 @@ describe('pontuação', () => {
       name: 'Segundo',
       wars: []
     };
-    const attack = (stars: number, destruction: number): WarEntry => ({
+    const attack = (stars: number, destruction: number): WarEntry => warEntry({
       status: 'attacked',
-      selected: true,
       attacked: true,
-      targetTh: 15,
       stars,
-      destruction,
-      defended: false,
-      enemyTh: 15,
-      defenseStars: 0,
-      warTag: '#WAR',
-      source: 'supercell',
-      manuallyAdjusted: false
+      destruction
     });
     first.wars = [attack(2, 90)];
     second.wars = [attack(2, 80)];
 
     expect(getRanking([second, first])[0].player.name).toBe('Primeiro');
+  });
+
+  it('separa ranking da rodada e ranking geral', () => {
+    const first: CwlPlayer = {
+      ...player,
+      name: 'Primeiro',
+      wars: [
+        warEntry({ status: 'attacked', attacked: true, stars: 1, destruction: 50 }),
+        warEntry({ status: 'attacked', attacked: true, stars: 3, destruction: 100 })
+      ]
+    };
+    const second: CwlPlayer = {
+      ...player,
+      id: '#P0Y8J',
+      tag: '#P0Y8J',
+      name: 'Segundo',
+      wars: [
+        warEntry({ status: 'attacked', attacked: true, stars: 3, destruction: 100 }),
+        warEntry({ status: 'attacked', attacked: true, stars: 0, destruction: 10 })
+      ]
+    };
+
+    expect(getRoundRanking([first, second], 0)[0].player.name).toBe('Segundo');
+    expect(getRanking([first, second])[0].player.name).toBe('Primeiro');
   });
 });

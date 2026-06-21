@@ -1,5 +1,5 @@
 import type { CwlPayload, HistoryItem } from '../shared/cwl.js';
-import { calculateWarScore } from '../shared/scoring.js';
+import { scoreWarEntry } from '../shared/scoring.js';
 
 type AppsScriptResponse<T> = {
   ok: boolean;
@@ -31,8 +31,7 @@ export function createSheetsService(url?: string, secret?: string) {
       players: cwl.players.map(player => ({
         ...player,
         wars: player.wars.map(entry => ({
-          ...entry,
-          score: calculateWarScore(player, entry)
+          ...scoreWarEntry(player, entry)
         }))
       }))
     };

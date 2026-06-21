@@ -6,56 +6,87 @@ export const DEFAULT_WEIGHTS = {
   uphill: 6,
   downhill: -4,
   wo: -35,
-  defZero: 15,
-  defOne: 10,
-  defTwo: 4,
-  defThree: -10,
-  resist: 20,
-  critical: -20
+  defenseSuperior: [15, 0, 0, -5],
+  defenseEqual: [10, 0, -5, -10],
+  defenseInferior: [5, -5, -10, -20]
 } as const;
 
 export type ScoringWeights = typeof DEFAULT_WEIGHTS;
 
-function fairDefensePoints(stars: number, weights: ScoringWeights) {
-  if (stars === 0) return weights.defZero;
-  if (stars === 1) return weights.defOne;
-  if (stars === 2) return weights.defTwo;
-  return weights.defThree;
+function effectivePlayerTh(player: CwlPlayer, entry: WarEntry) {
+  return entry.effectiveTh || player.th;
+}
+
+function effectiveTargetTh(entry: WarEntry) {
+  return entry.targetEffectiveTh || entry.targetTh;
+}
+
+function effectiveEnemyTh(entry: WarEntry) {
+  return entry.enemyEffectiveTh || entry.enemyTh;
+}
+
+function normalizedStars(stars: number) {
+  return Math.max(0, Math.min(3, Math.trunc(stars)));
+}
+
+export function calculateAttackScore(player: CwlPlayer, entry: WarEntry, weights: ScoringWeights = DEFAULT_WEIGHTS) {
+  if (entry.status === 'notSelected') return 0;
+  if (entry.status === 'wo') return weights.wo;
+  if (!entry.attacked && entry.status !== 'attacked') return 0;
+
+  let total = entry.stars * weights.star;
+  total += entry.destruction * weights.destruction;
+
+  const difference = effectiveTargetTh(entry) - effectivePlayerTh(player, entry);
+  if (difference > 0 && entry.stars >= 1) total += difference * weights.uphill;
+  if (difference < 0) total += Math.abs(difference) * weights.downhill;
+
+  return total;
+}
+
+export function calculateDefenseScore(player: CwlPlayer, entry: WarEntry, weights: ScoringWeights = DEFAULT_WEIGHTS) {
+  if (entry.status === 'notSelected' || !entry.defended) return 0;
+
+  const stars = normalizedStars(entry.defenseStars);
+  const difference = effectiveEnemyTh(entry) - effectivePlayerTh(player, entry);
+
+  if (difference > 0) return weights.defenseSuperior[stars] ?? 0;
+  if (difference < 0) return weights.defenseInferior[stars] ?? 0;
+  return weights.defenseEqual[stars] ?? 0;
 }
 
 export function calculateWarScore(player: CwlPlayer, entry: WarEntry, weights: ScoringWeights = DEFAULT_WEIGHTS) {
-  if (entry.status === 'notSelected' || entry.status === 'pending') return 0;
-
-  let total = 0;
-  if (entry.attacked || entry.status === 'attacked') {
-    total += entry.stars * weights.star;
-    total += entry.destruction * weights.destruction;
-
-    const difference = entry.targetTh - player.th;
-    if (difference > 0 && entry.stars >= 1) total += difference * weights.uphill;
-    if (difference < 0) total += Math.abs(difference) * weights.downhill;
-  } else {
-    total += weights.wo;
-  }
-
-  if (!entry.defended) return total;
-
-  const defenseDifference = entry.enemyTh - player.th;
-  if (defenseDifference > 0) {
-    if (entry.defenseStars <= 2) total += weights.resist;
-    return total;
-  }
-
-  if (defenseDifference === 0) return total + fairDefensePoints(entry.defenseStars, weights);
-  if (entry.defenseStars === 3) return total + weights.critical;
-  return total + fairDefensePoints(entry.defenseStars, weights);
+  return calculateAttackScore(player, entry, weights) + calculateDefenseScore(player, entry, weights);
 }
 
-export function getRanking(players: CwlPlayer[], weights: ScoringWeights = DEFAULT_WEIGHTS): PlayerRanking[] {
+export function scoreWarEntry(player: CwlPlayer, entry: WarEntry, weights: ScoringWeights = DEFAULT_WEIGHTS): WarEntry {
+  const attackScore = calculateAttackScore(player, entry, weights);
+  const defenseScore = calculateDefenseScore(player, entry, weights);
+  return {
+    ...entry,
+    attackScore,
+    defenseScore,
+    score: attackScore + defenseScore
+  };
+}
+
+function entriesForRanking(player: CwlPlayer, roundIndex?: number) {
+  if (roundIndex === undefined) return player.wars;
+  const entry = player.wars[roundIndex];
+  return entry ? [entry] : [];
+}
+
+function buildRanking(players: CwlPlayer[], weights: ScoringWeights, roundIndex?: number) {
   return players
     .map(player => {
-      const stats = player.wars.reduce<PlayerRanking['stats']>((total, entry) => {
-        total.score += calculateWarScore(player, entry, weights);
+      const stats = entriesForRanking(player, roundIndex).reduce<PlayerRanking['stats']>((total, entry) => {
+        const attackScore = entry.attackScore ?? calculateAttackScore(player, entry, weights);
+        const defenseScore = entry.defenseScore ?? calculateDefenseScore(player, entry, weights);
+        const score = entry.score ?? attackScore + defenseScore;
+
+        total.attackScore += attackScore;
+        total.defenseScore += defenseScore;
+        total.score += score;
         if (entry.status === 'attacked' || entry.attacked) {
           total.stars += entry.stars;
           total.destruction += entry.destruction;
@@ -65,7 +96,7 @@ export function getRanking(players: CwlPlayer[], weights: ScoringWeights = DEFAU
         }
         if (entry.defended) total.defenses += 1;
         return total;
-      }, { score: 0, stars: 0, destruction: 0, misses: 0, attacks: 0, defenses: 0 });
+      }, { attackScore: 0, defenseScore: 0, score: 0, stars: 0, destruction: 0, misses: 0, attacks: 0, defenses: 0 });
 
       return {
         player: {
@@ -82,4 +113,20 @@ export function getRanking(players: CwlPlayer[], weights: ScoringWeights = DEFAU
       || b.stats.stars - a.stats.stars
       || b.stats.destruction - a.stats.destruction
     );
+}
+
+export function getRanking(players: CwlPlayer[], weights: ScoringWeights = DEFAULT_WEIGHTS): PlayerRanking[] {
+  return buildRanking(players, weights);
+}
+
+export function getRoundRanking(
+  players: CwlPlayer[],
+  roundIndex: number,
+  weights: ScoringWeights = DEFAULT_WEIGHTS
+): PlayerRanking[] {
+  return buildRanking(
+    players.filter(player => player.wars[roundIndex]?.selected),
+    weights,
+    roundIndex
+  );
 }

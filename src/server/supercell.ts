@@ -5,7 +5,7 @@ import type {
   CwlPlayer,
   WarEntry
 } from '../shared/cwl.js';
-import { getRanking } from '../shared/scoring.js';
+import { getRanking, getRoundRanking, scoreWarEntry } from '../shared/scoring.js';
 
 type ApiAttack = {
   attackerTag: string;
@@ -18,6 +18,7 @@ type ApiAttack = {
 type ApiMember = {
   tag: string;
   name: string;
+  mapPosition?: number;
   townhallLevel?: number;
   townHallLevel?: number;
   attacks?: ApiAttack[];
@@ -55,6 +56,22 @@ type CacheEntry = {
   value: unknown;
 };
 
+type WarMemberSnapshot = {
+  effectiveTh: number;
+  mapPosition: number | null;
+  member: ApiMember;
+  tag: string;
+  th: number;
+};
+
+type WarContext = {
+  ours: ApiWarSide;
+  oursByTag: Map<string, WarMemberSnapshot>;
+  theirs: ApiWarSide;
+  theirsByTag: Map<string, WarMemberSnapshot>;
+  war: ApiWar;
+};
+
 const CACHE_MS = 5 * 60 * 1000;
 const cache = new Map<string, CacheEntry>();
 
@@ -87,6 +104,10 @@ function thOf(member: ApiMember | undefined, fallback = 3) {
   return member?.townhallLevel ?? member?.townHallLevel ?? fallback;
 }
 
+function mapPositionOf(member: ApiMember | undefined) {
+  return member?.mapPosition && member.mapPosition > 0 ? member.mapPosition : null;
+}
+
 function translateLeague(name: string | undefined) {
   if (!name) return 'Não classificado';
   const divisions: Record<string, string> = {
@@ -116,16 +137,68 @@ function bestDefenseAttack(enemyMembers: ApiMember[], defenderTag: string) {
     )[0];
 }
 
+function buildEffectiveThMap(side: ApiWarSide) {
+  const sorted = side.members
+    .map((member, index) => ({
+      member,
+      originalIndex: index,
+      tag: normalizeTag(member.tag),
+      th: thOf(member),
+      mapPosition: mapPositionOf(member)
+    }))
+    .sort((a, b) =>
+      (a.mapPosition ?? Number.MAX_SAFE_INTEGER) - (b.mapPosition ?? Number.MAX_SAFE_INTEGER)
+      || a.originalIndex - b.originalIndex
+    );
+
+  const result = new Map<string, WarMemberSnapshot>();
+  let previousEffectiveTh = Number.MAX_SAFE_INTEGER;
+
+  for (const item of sorted) {
+    const effectiveTh = previousEffectiveTh === Number.MAX_SAFE_INTEGER
+      ? item.th
+      : Math.min(item.th, previousEffectiveTh);
+    previousEffectiveTh = effectiveTh;
+    result.set(item.tag, {
+      effectiveTh,
+      mapPosition: item.mapPosition,
+      member: item.member,
+      tag: item.tag,
+      th: item.th
+    });
+  }
+
+  return result;
+}
+
+function buildWarContext(war: ApiWar, allowedClanTag: string): WarContext {
+  const ours = normalizeTag(war.clan.tag) === allowedClanTag ? war.clan : war.opponent;
+  const theirs = ours === war.clan ? war.opponent : war.clan;
+  return {
+    ours,
+    theirs,
+    oursByTag: buildEffectiveThMap(ours),
+    theirsByTag: buildEffectiveThMap(theirs),
+    war
+  };
+}
+
 function emptyWarEntry(status: 'pending' | 'notSelected', th: number, warTag: string | null): WarEntry {
   return {
     status,
     selected: status !== 'notSelected',
     attacked: false,
+    mapPosition: null,
+    effectiveTh: th,
+    targetMapPosition: null,
     targetTh: th,
+    targetEffectiveTh: th,
     stars: 0,
     destruction: 0,
     defended: false,
+    enemyMapPosition: null,
     enemyTh: th,
+    enemyEffectiveTh: th,
     defenseStars: 0,
     warTag,
     source: 'supercell',
@@ -157,46 +230,64 @@ export function normalizeCwl(
     state: wars[index]?.state || 'notStarted'
   }));
 
+  const roundContexts = rounds.map((_, index) => {
+    const war = wars[index];
+    return war ? buildWarContext(war, allowedClanTag) : null;
+  });
+
   const players: CwlPlayer[] = [...members.values()].map(player => ({
     id: player.tag,
     tag: player.tag,
     name: player.name,
     th: player.th,
-    source: 'supercell',
+    source: 'supercell' as const,
     wars: rounds.map((round, index) => {
-      const war = wars[index];
-      if (!war) return emptyWarEntry('pending', player.th, round.warTag);
+      const context = roundContexts[index];
+      if (!context) return emptyWarEntry('pending', player.th, round.warTag);
 
-      const ours = normalizeTag(war.clan.tag) === allowedClanTag ? war.clan : war.opponent;
-      const theirs = ours === war.clan ? war.opponent : war.clan;
-      const member = ours.members.find(item => normalizeTag(item.tag) === player.tag);
+      const { ours, oursByTag, theirs, theirsByTag, war } = context;
+      const playerSnapshot = oursByTag.get(player.tag);
+      const member = playerSnapshot?.member ?? ours.members.find(item => normalizeTag(item.tag) === player.tag);
       if (!member) return emptyWarEntry('notSelected', player.th, round.warTag);
 
       const attack = (member.attacks || [])[0];
       const target = attack
         ? theirs.members.find(item => normalizeTag(item.tag) === normalizeTag(attack.defenderTag))
         : undefined;
+      const targetSnapshot = target ? theirsByTag.get(normalizeTag(target.tag)) : undefined;
       const defense = bestDefenseAttack(theirs.members, player.tag);
       const attacker = defense
         ? theirs.members.find(item => normalizeTag(item.tag) === normalizeTag(defense.attackerTag))
         : undefined;
-      const status = attack ? 'attacked' : war.state === 'warEnded' ? 'wo' : 'pending';
+      const attackerSnapshot = attacker ? theirsByTag.get(normalizeTag(attacker.tag)) : undefined;
+      const status: WarEntry['status'] = attack ? 'attacked' : war.state === 'warEnded' ? 'wo' : 'pending';
+      const targetTh = thOf(target, player.th);
+      const enemyTh = thOf(attacker, player.th);
 
       return {
         status,
         selected: true,
         attacked: Boolean(attack),
-        targetTh: thOf(target, player.th),
+        mapPosition: playerSnapshot?.mapPosition ?? mapPositionOf(member),
+        effectiveTh: playerSnapshot?.effectiveTh ?? thOf(member, player.th),
+        targetMapPosition: targetSnapshot?.mapPosition ?? mapPositionOf(target),
+        targetTh,
+        targetEffectiveTh: targetSnapshot?.effectiveTh ?? targetTh,
         stars: attack?.stars || 0,
         destruction: attack?.destructionPercentage || 0,
         defended: Boolean(defense),
-        enemyTh: thOf(attacker, player.th),
+        enemyMapPosition: attackerSnapshot?.mapPosition ?? mapPositionOf(attacker),
+        enemyTh,
+        enemyEffectiveTh: attackerSnapshot?.effectiveTh ?? enemyTh,
         defenseStars: defense?.stars || 0,
         warTag: round.warTag,
-        source: 'supercell',
+        source: 'supercell' as const,
         manuallyAdjusted: false
       };
     })
+  })).map(player => ({
+    ...player,
+    wars: player.wars.map(entry => scoreWarEntry(player, entry))
   }));
 
   const completedWars = wars.filter((war): war is ApiWar => Boolean(war && war.state === 'warEnded'));
@@ -210,7 +301,7 @@ export function normalizeCwl(
   const teamSize = [15, 30].includes(reportedTeamSize) ? reportedTeamSize : 0;
 
   return {
-    version: 5,
+    version: 6,
     source: 'supercell',
     fetchedAt: new Date().toISOString(),
     season: group.season,
@@ -229,6 +320,10 @@ export function normalizeCwl(
     rounds,
     players,
     ranking: getRanking(players),
+    roundRankings: rounds.map((round, index) => ({
+      day: round.day,
+      ranking: getRoundRanking(players, index)
+    })),
     warnings: [
       ...rounds
         .filter(round => !round.warTag)

@@ -23,7 +23,7 @@ import {
   X
 } from 'lucide-react';
 import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react';
-import type { ClanMemberDetail, ClanRosterPayload, CwlPayload, HistoryItem } from '../shared/cwl';
+import type { ClanMemberDetail, ClanRosterPayload, CwlPayload, HistoryItem, PlayerRanking, WarEntry } from '../shared/cwl';
 import { ApiError, api } from './api';
 
 type View = 'overview' | 'roster' | 'cwl' | 'history';
@@ -41,6 +41,12 @@ function formatScore(value: number) {
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat('pt-BR').format(value);
+}
+
+function formatSignedScore(value: number | null | undefined) {
+  const score = value ?? 0;
+  if (score > 0) return `+${formatScore(score)}`;
+  return formatScore(score);
 }
 
 function roleLabel(role: string) {
@@ -70,6 +76,16 @@ function findOperationalRound(cwl: CwlPayload) {
     ?? cwl.rounds.filter(round => round.warTag).at(-1)
     ?? cwl.rounds[0]
     ?? null;
+}
+
+function thLabel(th: number, effectiveTh?: number) {
+  if (effectiveTh && effectiveTh !== th) return `CV${th} → efetivo CV${effectiveTh}`;
+  return `CV${th}`;
+}
+
+function playerRoundEntry(cwl: CwlPayload, row: PlayerRanking, roundIndex: number): WarEntry | null {
+  if (roundIndex < 0) return null;
+  return cwl.players.find(player => player.tag === row.player.tag)?.wars[roundIndex] ?? null;
 }
 
 function warPreferenceLabel(preference: string) {
@@ -648,8 +664,10 @@ function App() {
       : []
   );
   const cwlRoundRanking = cwl
-    ? cwl.ranking.filter(row => cwlSelectedTags.has(row.player.tag))
+    ? cwl.roundRankings?.find(round => round.day === cwlVisibleRound?.day)?.ranking
+      ?? cwl.ranking.filter(row => cwlSelectedTags.has(row.player.tag))
     : [];
+  const cwlGeneralRanking = cwl?.ranking ?? [];
   const cwlReserveCount = cwl ? Math.max(cwl.players.length - cwlRoundRanking.length, 0) : 0;
   const cwlSyncedRounds = cwl?.rounds.filter(round => round.warTag).length ?? 0;
   const cwlAttackCount = cwlRoundRanking.reduce((total, row) => total + row.stats.attacks, 0);
@@ -842,8 +860,8 @@ function App() {
                 <section className="ranking-section">
                   <div className="section-title">
                     <div>
-                      <p className="eyebrow">Pontuação atual</p>
-                      <h2>Ranking individual</h2>
+                      <p className="eyebrow">Rodada selecionada</p>
+                      <h2>Ranking da rodada</h2>
                     </div>
                     <span className="ranking-counter">
                       Rodada {cwlVisibleRound?.day ?? '--'} · {cwlRoundRanking.length}/{cwl.config.teamSize || cwlRoundRanking.length} escalados
@@ -851,23 +869,62 @@ function App() {
                   </div>
                   <div className="ranking-table">
                     <div className="ranking-head">
-                      <span>#</span><span>Jogador</span><span>Pontos</span><span>Estrelas</span><span>W.O.</span>
+                      <span>#</span><span>Jogador</span><span>Ataque</span><span>Defesa</span><span>Total</span><span>Estrelas</span><span>W.O.</span>
                     </div>
-                    {cwlRoundRanking.map((row, index) => (
-                      <div className="ranking-row" key={row.player.tag}>
-                        <strong className={index < 3 ? 'podium-rank' : ''}>{index + 1}</strong>
-                        <span><strong>{row.player.name}</strong><small>CV{row.player.th}</small></span>
-                        <strong>{formatScore(row.stats.score)}</strong>
-                        <span><Star size={15} />{row.stats.stars}</span>
-                        <span>{row.stats.misses}</span>
-                      </div>
-                    ))}
+                    {cwlRoundRanking.map((row, index) => {
+                      const entry = cwlVisibleRoundIndex >= 0 ? playerRoundEntry(cwl, row, cwlVisibleRoundIndex) : null;
+                      return (
+                        <div className="ranking-row" key={row.player.tag}>
+                          <strong className={index < 3 ? 'podium-rank' : ''}>{index + 1}</strong>
+                          <span>
+                            <strong>{row.player.name}</strong>
+                            <small>
+                              {entry?.mapPosition ? `Mapa #${entry.mapPosition} · ` : ''}
+                              {thLabel(row.player.th, entry?.effectiveTh)}
+                            </small>
+                          </span>
+                          <strong>{formatSignedScore(row.stats.attackScore)}</strong>
+                          <strong>{formatSignedScore(row.stats.defenseScore)}</strong>
+                          <strong>{formatScore(row.stats.score)}</strong>
+                          <span><Star size={15} />{row.stats.stars}</span>
+                          <span>{row.stats.misses}</span>
+                        </div>
+                      );
+                    })}
                   </div>
                   {cwlReserveCount > 0 && (
                     <p className="ranking-note">
                       {cwlReserveCount} jogador(es) do elenco da CWL estão como reserva nesta rodada e podem aparecer aqui se forem escalados em outro dia.
                     </p>
                   )}
+                </section>
+
+                <section className="ranking-section">
+                  <div className="section-title">
+                    <div>
+                      <p className="eyebrow">Acumulado</p>
+                      <h2>Ranking geral da CWL</h2>
+                    </div>
+                    <span className="ranking-counter">
+                      {cwlGeneralRanking.length} jogador(es)
+                    </span>
+                  </div>
+                  <div className="ranking-table">
+                    <div className="ranking-head">
+                      <span>#</span><span>Jogador</span><span>Ataque</span><span>Defesa</span><span>Total</span><span>Estrelas</span><span>W.O.</span>
+                    </div>
+                    {cwlGeneralRanking.map((row, index) => (
+                      <div className="ranking-row" key={row.player.tag}>
+                        <strong className={index < 3 ? 'podium-rank' : ''}>{index + 1}</strong>
+                        <span><strong>{row.player.name}</strong><small>CV{row.player.th}</small></span>
+                        <strong>{formatSignedScore(row.stats.attackScore)}</strong>
+                        <strong>{formatSignedScore(row.stats.defenseScore)}</strong>
+                        <strong>{formatScore(row.stats.score)}</strong>
+                        <span><Star size={15} />{row.stats.stars}</span>
+                        <span>{row.stats.misses}</span>
+                      </div>
+                    ))}
+                  </div>
                 </section>
               </div>
             )}

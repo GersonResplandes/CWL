@@ -17,7 +17,13 @@ var CWL_HEADERS = [
   'AJUSTE_DEFESA',
   'MOTIVO_AJUSTE',
   'PONTUACAO',
-  'ATUALIZADO_EM'
+  'ATUALIZADO_EM',
+  'POSICAO_MAPA',
+  'CV_EFETIVO',
+  'CV_ALVO_EFETIVO',
+  'CV_ATACANTE_EFETIVO',
+  'PONTOS_ATAQUE',
+  'PONTOS_DEFESA'
 ];
 
 var CWL_TABLE_ROW = 11;
@@ -155,7 +161,13 @@ function saveCwl(cwl) {
         saved[2],
         saved[3],
         entry.score || 0,
-        new Date(cwl.fetchedAt)
+        new Date(cwl.fetchedAt),
+        entry.mapPosition || '',
+        entry.effectiveTh || '',
+        entry.targetEffectiveTh || '',
+        entry.enemyEffectiveTh || '',
+        entry.attackScore || 0,
+        entry.defenseScore || 0
       ]);
     });
   });
@@ -217,7 +229,7 @@ function formatCwlSheet(sheet, rowCount) {
   sheet.setColumnWidth(17, 220);
   sheet.autoResizeColumns(1, 4);
   sheet.autoResizeColumns(6, 11);
-  sheet.autoResizeColumns(18, 2);
+  sheet.autoResizeColumns(18, 8);
   if (rowCount > 0) {
     sheet.getRange(CWL_TABLE_ROW + 1, 1, rowCount, CWL_HEADERS.length)
       .setBackground('#F7FBF9')
